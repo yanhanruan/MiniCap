@@ -1,17 +1,17 @@
 #define _WIN32_WINNT 0x0600
 #include <windows.h>
-#include <algorithm> // 引入 std::min 需要的头文件
-#include <cstdlib>   // 引入 std::abs 需要的头文件
+#include <algorithm> // Header required for std::min
+#include <cstdlib>   // Header required for std::abs
 
 #pragma comment(linker, "/SUBSYSTEM:windows /ENTRY:mainCRTStartup")
 
-// 全局变量
+// Global variables
 bool isSelecting = false;
 POINT ptStart, ptEnd;
 HBITMAP hFullScreenshot = NULL;
 HWND hOverlayWnd = NULL;
 
-// 截取当前整个屏幕并返回位图句柄
+// Capture the entire screen and return the bitmap handle
 HBITMAP CaptureScreen() {
     HDC hScreen = GetDC(NULL);
     int w = GetSystemMetrics(SM_CXSCREEN);
@@ -25,7 +25,7 @@ HBITMAP CaptureScreen() {
     return hBmp;
 }
 
-// 拷贝指定区域到剪贴板
+// Copy the specified region to the clipboard
 bool CopyRegionToClipboard(HDC hdcFrozen, int x, int y, int w, int h) {
     bool success = false;
     HDC hScreen = GetDC(NULL);
@@ -52,7 +52,7 @@ bool CopyRegionToClipboard(HDC hdcFrozen, int x, int y, int w, int h) {
     return success;
 }
 
-// 遮罩窗口的回调函数
+// Overlay window callback procedure
 LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_LBUTTONDOWN:
@@ -76,7 +76,7 @@ LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 isSelecting = false;
                 ReleaseCapture();
 
-                // 修复点：使用 std::min 和 std::abs
+                // Calculate region using std::min and std::abs
                 int x = std::min(ptStart.x, ptEnd.x);
                 int y = std::min(ptStart.y, ptEnd.y);
                 int w = std::abs(ptStart.x - ptEnd.x);
@@ -120,7 +120,7 @@ LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (isSelecting) {
                 HBRUSH hBrush = CreateSolidBrush(RGB(255, 0, 0));
                 
-                // 修复点：使用 std::min 和 std::abs
+                // Calculate region using std::min and std::abs
                 int x = std::min(ptStart.x, ptEnd.x);
                 int y = std::min(ptStart.y, ptEnd.y);
                 int w = std::abs(ptStart.x - ptEnd.x);
@@ -160,7 +160,7 @@ LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 }
 
 int main() {
-    // 解决高分辨率/系统缩放导致的截图放大和不全问题
+    // Fix screenshot scaling issues on high-DPI / system-scaled displays
     SetProcessDPIAware();
 
     WNDCLASSW wc = {0};
