@@ -2,12 +2,14 @@
 #include <windows.h>
 #include <algorithm> // Header required for std::min
 #include <cstdlib>   // Header required for std::abs
+#include <cstdio>    // Header required for sprintf_s
 
 #pragma comment(linker, "/SUBSYSTEM:windows /ENTRY:mainCRTStartup")
 
 // Global variables
 bool isSelecting = false;
 POINT ptStart, ptEnd;
+POINT ptCursor = {0, 0};   // Current mouse cursor position for real-time color display
 HBITMAP hFullScreenshot = NULL;
 HWND hOverlayWnd = NULL;
 
@@ -52,6 +54,93 @@ bool CopyRegionToClipboard(HDC hdcFrozen, int x, int y, int w, int h) {
     return success;
 }
 
+// Get the color of a pixel from the captured screenshot bitmap
+COLORREF GetScreenshotPixel(int x, int y) {
+    HDC hdc = GetDC(NULL);
+    HDC hMemDC = CreateCompatibleDC(hdc);
+    SelectObject(hMemDC, hFullScreenshot);
+    COLORREF color = GetPixel(hMemDC, x, y);
+    DeleteDC(hMemDC);
+    ReleaseDC(NULL, hdc);
+    return color;
+}
+
+// Copy a string to the clipboard as Unicode text
+bool CopyStringToClipboard(const char* str) {
+    int len = MultiByteToWideChar(CP_ACP, 0, str, -1, NULL, 0);
+    HGLOBAL hGlobal = GlobalAlloc(GMEM_MOVEABLE, len * sizeof(wchar_t));
+    if (!hGlobal) return false;
+
+    wchar_t* pData = (wchar_t*)GlobalLock(hGlobal);
+    MultiByteToWideChar(CP_ACP, 0, str, -1, pData, len);
+    GlobalUnlock(hGlobal);
+
+    bool success = false;
+    if (OpenClipboard(NULL)) {
+        EmptyClipboard();
+        success = (SetClipboardData(CF_UNICODETEXT, hGlobal) != NULL);
+        CloseClipboard();
+    }
+
+    if (!success) {
+        GlobalFree(hGlobal);
+    }
+    return success;
+}
+
+// Draw the pixel color info (swatch + hex text) near the cursor on the given DC.
+// hdcSource must be a DC that already has hFullScreenshot selected into it.
+void DrawColorInfo(HDC hdc, HDC hdcSource, int cursorX, int cursorY, int screenW, int screenH) {
+    COLORREF pixelColor = GetPixel(hdcSource, cursorX, cursorY);
+    
+    char hexStr[16];
+    sprintf_s(hexStr, sizeof(hexStr), "#%02X%02X%02X", GetRValue(pixelColor), GetGValue(pixelColor), GetBValue(pixelColor));
+    
+    int swatchSize = 18;
+    int padding = 5;
+    int textLen = (int)strlen(hexStr);
+    int textWidth = textLen * 8;
+    int totalWidth = swatchSize + padding + textWidth + padding * 2;
+    int totalHeight = swatchSize + padding * 2;
+    
+    // Position info box near cursor (below and to the right)
+    int infoX = cursorX + 18;
+    int infoY = cursorY + 18;
+    
+    // Keep within screen bounds
+    if (infoX + totalWidth > screenW) infoX = cursorX - totalWidth - 18;
+    if (infoY + totalHeight > screenH) infoY = cursorY - totalHeight - 18;
+    if (infoX < 0) infoX = 2;
+    if (infoY < 0) infoY = 2;
+    
+    // Draw semi-transparent-like dark background
+    HBRUSH hBgBrush = CreateSolidBrush(RGB(30, 30, 30));
+    RECT bgRect = {infoX, infoY, infoX + totalWidth, infoY + totalHeight};
+    FillRect(hdc, &bgRect, hBgBrush);
+    DeleteObject(hBgBrush);
+    
+    // Draw white border around the info box
+    HBRUSH hBorderBrush = CreateSolidBrush(RGB(200, 200, 200));
+    FrameRect(hdc, &bgRect, hBorderBrush);
+    DeleteObject(hBorderBrush);
+    
+    // Draw color swatch
+    HBRUSH hColorBrush = CreateSolidBrush(pixelColor);
+    RECT swatchRect = {infoX + padding, infoY + padding, infoX + padding + swatchSize, infoY + padding + swatchSize};
+    FillRect(hdc, &swatchRect, hColorBrush);
+    DeleteObject(hColorBrush);
+    
+    // Draw thin white border around swatch
+    HBRUSH hSwatchBorder = CreateSolidBrush(RGB(255, 255, 255));
+    FrameRect(hdc, &swatchRect, hSwatchBorder);
+    DeleteObject(hSwatchBorder);
+    
+    // Draw hex text
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, RGB(255, 255, 255));
+    TextOutA(hdc, infoX + padding + swatchSize + padding, infoY + padding + 2, hexStr, textLen);
+}
+
 // Overlay window callback procedure
 LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
@@ -64,11 +153,14 @@ LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
 
         case WM_MOUSEMOVE:
+            // Always update cursor position for real-time color display
+            ptCursor.x = LOWORD(lParam);
+            ptCursor.y = HIWORD(lParam);
             if (isSelecting) {
-                ptEnd.x = LOWORD(lParam);
-                ptEnd.y = HIWORD(lParam);
-                InvalidateRect(hwnd, NULL, FALSE);
+                ptEnd = ptCursor;
             }
+            // Force synchronous redraw so the color info follows the cursor in real-time
+            RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW);
             return 0;
 
         case WM_LBUTTONUP:
@@ -81,6 +173,24 @@ LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 int y = std::min(ptStart.y, ptEnd.y);
                 int w = std::abs(ptStart.x - ptEnd.x);
                 int h = std::abs(ptStart.y - ptEnd.y);
+
+                if (w == 0 && h == 0) {
+                    // Simple click without dragging: pick pixel color instead of screenshot
+                    COLORREF color = GetScreenshotPixel(ptStart.x, ptStart.y);
+                    char hexStr[16];
+                    sprintf_s(hexStr, sizeof(hexStr), "#%02X%02X%02X", GetRValue(color), GetGValue(color), GetBValue(color));
+
+                    if (CopyStringToClipboard(hexStr)) {
+                        wchar_t msgBuf[128];
+                        swprintf_s(msgBuf, L"Color hex value \"%S\" has been copied to the clipboard.", hexStr);
+                        MessageBoxW(NULL, msgBuf, L"Color Picked", MB_OK | MB_ICONINFORMATION | MB_SYSTEMMODAL);
+                    } else {
+                        MessageBoxW(NULL, L"Failed to copy color to clipboard!", L"Error", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+                    }
+                    
+                    DestroyWindow(hwnd);
+                    return 0;
+                }
 
                 bool copied = false;
                 if (w > 0 && h > 0) {
@@ -95,9 +205,9 @@ LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 DestroyWindow(hwnd);
 
                 if (copied) {
-                    MessageBoxW(NULL, L"区域截图已复制到剪贴板！", L"截图成功", MB_OK | MB_ICONINFORMATION | MB_SYSTEMMODAL);
+                    MessageBoxW(NULL, L"Screenshot region has been copied to the clipboard!", L"Screenshot Success", MB_OK | MB_ICONINFORMATION | MB_SYSTEMMODAL);
                 } else if (w > 0 && h > 0) {
-                    MessageBoxW(NULL, L"写入剪贴板失败！", L"错误", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+                    MessageBoxW(NULL, L"Failed to write to clipboard!", L"Error", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
                 }
             }
             return 0;
@@ -130,6 +240,11 @@ LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 FrameRect(hMemDC, &r, hBrush);
                 DeleteObject(hBrush);
             }
+
+            // Draw real-time pixel color info at cursor position.
+            // hScreenDC already has hFullScreenshot selected — pass it as the pixel source
+            // so GetPixel reads from the screenshot without attempting a second SelectObject.
+            DrawColorInfo(hMemDC, hScreenDC, ptCursor.x, ptCursor.y, sw, sh);
 
             BitBlt(hdc, 0, 0, sw, sh, hMemDC, 0, 0, SRCCOPY);
 
@@ -171,12 +286,12 @@ int main() {
     RegisterClassW(&wc);
 
     if (!RegisterHotKey(NULL, 1, MOD_CONTROL | MOD_ALT, 'P')) {
-        MessageBoxW(NULL, L"快捷键 Ctrl+Alt+P 注册失败，可能被其他软件占用！", L"启动错误", MB_OK | MB_ICONERROR);
+        MessageBoxW(NULL, L"Hotkey Ctrl+Alt+P registration failed, may be occupied by another program!", L"Startup Error", MB_OK | MB_ICONERROR);
         return 1;
     }
     RegisterHotKey(NULL, 2, MOD_CONTROL | MOD_ALT, 'Q');
 
-    MessageBoxW(NULL, L"截图工具已在后台静默运行。\n\n- 按 [Ctrl + Alt + P] 唤醒区域截图\n- 按 [Ctrl + Alt + Q] 彻底退出程序", L"启动成功", MB_OK | MB_ICONINFORMATION);
+    MessageBoxW(NULL, L"Snipping tool is running silently in the background.\n\n- Press [Ctrl + Alt + P] to start region snip (or color pick)\n- Press [Ctrl + Alt + Q] to exit the program completely", L"Startup Success", MB_OK | MB_ICONINFORMATION);
 
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
@@ -185,6 +300,9 @@ int main() {
                 hFullScreenshot = CaptureScreen();
                 int w = GetSystemMetrics(SM_CXSCREEN);
                 int h = GetSystemMetrics(SM_CYSCREEN);
+                
+                // Initialize cursor position for immediate color display
+                GetCursorPos(&ptCursor);
                 
                 hOverlayWnd = CreateWindowExW(
                     WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
